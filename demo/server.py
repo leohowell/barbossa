@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import json
 import time
 from collections import deque
 
+import redis
 import bottle
 import requests
 from bottle import (route, run, template, response, request, post,
-                    get, delete, static_file)
+                    get, delete, static_file, redirect)
 
-from wechat.wechat import WeChatClient, WeChatMeta
+sys.path.append(os.path.dirname(__file__) + '/../wechat')
+
+from wechat import WeChatClient, WeChatMeta
 
 
 ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -20,12 +24,24 @@ bottle.debug(True)
 bottle.TEMPLATE_PATH = [ROOT_PATH + '/static/templates']
 
 
-MQ = deque()
 client = WeChatClient()
+
+MQ = deque()
+REDIS = redis.StrictRedis()
+CREDENTIAL_KEY_PREFIX = 'barbossa:test-user'
 
 
 def message_callback(msg):
+    print(msg)
     MQ.append(msg)
+
+
+def save_credential(uin, data):
+    REDIS.set(CREDENTIAL_KEY_PREFIX, json.dumps(data), ex=300)
+
+
+client.message_callback = [message_callback]
+client.credential_update_callback = [save_credential]
 
 
 @route('/static/<filename:path>')
@@ -35,13 +51,17 @@ def send_static(filename):
 
 @route('/hello/<name>')
 def index(name):
-    return template('<b>Hello {{name}}</b>!', name=name)
+    return template('<h3>Hello {{name}}</h3>!', name=name)
 
 
 @route('/login')
 def login():
+    credential = REDIS.get(CREDENTIAL_KEY_PREFIX)
+    if credential:
+        login = client.login_by_credential(json.loads(credential))
+        if login:
+            return redirect('/login/result')
     response.content_type = 'image/svg+xml'
-    client.message_callback = [message_callback]
     client.login_by_qrcode(thread=True)
     return client.get_qrcode()
 
@@ -50,14 +70,14 @@ def login():
 def login_result():
     if client.login:
         return (
-            '<b>Nickname: {}</b>'
-            '<b>Username: {}</b>'
-            '<b>Uin: {}</b>'
-            '<b>alias: {}</b>'
-            '<b>Time: {}</b>'
-            '<b>Main Uri: {}</b>'
-            '<b>pass_ticket: {}</b>'
-            '<b>upload_url: {}</b>'.
+            '<h3>Nickname: {}</h3>'
+            '<h3>Username: {}</h3>'
+            '<h3>Uin: {}</h3>'
+            '<h3>alias: {}</h3>'
+            '<h3>Time: {}</h3>'
+            '<h3>Main Uri: {}</h3>'
+            '<h3>pass_ticket: {}</h3>'
+            '<h3>upload_url: {}</h3>'.
             format(client.nickname, client.username, client.uin,
                    client.alias, time.ctime(),
                    client.login_info['main_uri'],
@@ -66,7 +86,7 @@ def login_result():
                    )
         )
     else:
-        return '<b>Please refresh the page</b>'
+        return '<h3>Please refresh the page</h3>'
 
 
 @route('/message')
@@ -134,4 +154,4 @@ def get_avatar(user_id):
 
 
 if __name__ == '__main__':
-    run(host='localhost', port=8000, server='gunicorn')
+    run(host='localhost', port=8000)

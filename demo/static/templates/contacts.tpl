@@ -8,8 +8,8 @@
             <div class="box border pink">
             <div class="box-title">
                 <h4>
-                    <img class="head-image" src="/contacts/avatar/{{ group['UserName'] }}">
-                    【{{ group['NickName'] }}】 - {{ len(group['MemberList']) }}人
+                    <img class="head-image" src="/contacts/avatar/{{ group.user_id }}">
+                    【{{ group.nickname }}】 - {{ len(group.members) }}人
                 </h4>
             </div>
             <div class="box-body">
@@ -25,16 +25,16 @@
                     </tr>
                     </thead>
                     <tbody>
-                    %for index, member in enumerate(group['MemberList'].values(), start=1):
+                    %for index, member in enumerate(group.members.values(), start=1):
                     <tr>
                         <td class="col-md-1">{{ index }}</td>
-                        <td class="col-md-2"><img class="head-image" src="/contacts/avatar/{{ member['UserName'] }}"></td>
-                        <td class="col-md-3">{{ member['NickName'] }}</td>
-                        <td class="col-md-3">{{ member['DisplayName'] }}</td>
-                        <td class="col-md-1">{{ member['UserName'] }}</td>
+                        <td class="col-md-2"><img class="head-image" src="/contacts/avatar/{{ member.user_id }}"></td>
+                        <td class="col-md-3">{{ member.nickname }}</td>
+                        <td class="col-md-3">{{ member.display_name }}</td>
+                        <td class="col-md-1">{{ member.user_id }}</td>
                         <td class="col-md-2">
                             <button class="btn btn-danger delete-member"
-                                    data-url="/contacts/group/{{ group['UserName'] }}/{{ member['UserName'] }}">移除
+                                    data-url="/contacts/group/{{ group.user_id }}/{{ member.user_id }}">移除
                             </button>
                         </td>
                     </tr>
@@ -47,7 +47,7 @@
         <div class="col-md-4">
             <div class="box border pink">
             <div class="box-title">
-                <h4><img class="head-image" src="/contacts/avatar/{{ group['UserName'] }}"> 发送消息</h4>
+                <h4><img class="head-image" src="/contacts/avatar/{{ group.user_id }}"> 发送消息</h4>
             </div>
             <div class="box-body">
                 <table class="table table-bordered table-striped">
@@ -60,13 +60,13 @@
                     <tbody>
                     <tr>
                         <td>
-                            <form action="/message/text/{{ group['UserName'] }}" method="post">
+                            <form action="/message/text/{{ group.user_id }}" method="post">
                                 <textarea name="message" class="form-control" rows="4"></textarea>
                                 <input class="btn btn-success message-btn" type="submit" value="发送群消息" />
                             </form>
                         </td>
                         <td>
-                            <form action="/message/image/{{ group['UserName'] }}" method="post">
+                            <form action="/message/image/{{ group.user_id }}" method="post">
                                 <textarea name="url" class="form-control" rows="4"></textarea>
                             <input class="btn btn-success message-btn" type="submit" value="发送图片消息" />
                             </form>

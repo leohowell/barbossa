@@ -13,13 +13,14 @@ import unittest
 import functools
 import threading
 import mimetypes
-import async_timeout
+import concurrent.futures
 from pprint import pprint
 from urllib.parse import urlparse, unquote
 from collections import OrderedDict
 
 import aiohttp
 import requests
+import async_timeout
 from lxml import etree
 from pyqrcode import QRCode
 from requests.utils import cookiejar_from_dict
@@ -62,18 +63,16 @@ class NamedVKDict(object):
         return self._index[value]
 
 
-# TODO: re-implement this function
-emoji_regex = re.compile(r'<span class="emoji emoji(.{1,10})"></span>')
 
 
-def emoji_formatter(d, k):
-    """ 
-    _emoji_debugger is for bugs about emoji match caused by wechat 
-    backstage like :face with tears of joy: will be replaced with 
+def fix_emoji(val):
+    """
+    _emoji_debugger is for bugs about emoji match caused by wechat
+    backstage like :face with tears of joy: will be replaced with
     :cat face with tears of joy:
     """
-    def _emoji_debugger(d, k):
-        s = d[k].replace('<span class="emoji emoji1f450"></span',
+    def _emoji_debugger(val):
+        s = val.replace('<span class="emoji emoji1f450"></span',
                          '<span class="emoji emoji1f450"></span>')
 
         def __fix_miss_match(m):
@@ -82,7 +81,7 @@ def emoji_formatter(d, k):
                 '1f4ab': '1f616', '1f64d': '1f614', '1f63b': '1f60d',
                 '1f63d': '1f618', '1f64e': '1f621', '1f63f': '1f622',
                 }.get(m.group(1), m.group(1)))
-        return emoji_regex.sub(__fix_miss_match, s)
+        return WeChatMeta.RE['emoji'].sub(__fix_miss_match, s)
 
     def _emoji_formatter(m):
         s = m.group(1)
@@ -95,8 +94,9 @@ def emoji_formatter(d, k):
         else:
             return ('\\U%s'%m.group(1).rjust(8, '0'))\
                 .encode('utf8').decode('unicode-escape', 'replace')
-    d[k] = _emoji_debugger(d, k)
-    d[k] = emoji_regex.sub(_emoji_formatter, d[k])
+    val = _emoji_debugger(val)
+    val = WeChatMeta.RE['emoji'].sub(_emoji_formatter, val)
+    return val
 
 
 ##############
@@ -141,6 +141,7 @@ class WeChatMeta(object):
     INVITE_BY_MYSELF = '你'
     MP_FLAG = 'gh_'
     LOGIN_URI = 'https://login.weixin.qq.com'
+    COOKIE_DOMAIN = '.qq.com'
     TIME_FORMAT = '%a %b %d %Y %H:%M:%S GMT+0800 (CST)'
 
     URL = {
@@ -179,6 +180,7 @@ class WeChatMeta(object):
         'invite': re.compile(u'("(?P<invite_by>.*?)")?\u9080\u8bf7"'
                              u'(?P<invitee>.*?)"加入了群聊'),
         'remove': re.compile(u'"(?P<nickname>.*?)"移出了群聊'),
+        'emoji': re.compile(r'<span class="emoji emoji(.{1,10})"></span>'),
     }
 
 
@@ -192,6 +194,47 @@ MESSAGE_TYPE = NamedVKDict({
     'INITIALIZE': 51,
     'SYSTEM': 10000,
 })
+
+
+class Contact(object):
+    RAW_FIELD = ['UserName', 'NickName', 'MemberList', 'DisplayName']
+
+    def __init__(self, raw_contact, owner_id):
+        self.__bool = bool(raw_contact)
+        if not self.__bool:
+            return
+
+        member_list = raw_contact.get('MemberList', [])
+
+        self.from_user = owner_id
+        self.user_id = raw_contact['UserName']
+        self.nickname = fix_emoji(raw_contact['NickName'])
+        self.display_name = fix_emoji(raw_contact.get('DisplayName', ''))
+        self.is_owner = self._is_owner(member_list, owner_id)
+        self.members = self.process_members(member_list, owner_id)
+        self.is_group = False
+
+    @classmethod
+    def process_members(cls, members, owner_id):
+        return {m['UserName']: cls(m, owner_id) for m in members}
+
+    @classmethod
+    def _is_owner(cls, members, owner_id):
+        if not members:
+            return False
+        return members[0]['UserName'] == owner_id
+
+    @classmethod
+    def is_data_corruption(cls, raw_contact):
+        if not raw_contact:
+            return True
+        for field in cls.RAW_FIELD:
+            if field not in raw_contact:
+                return True
+        return True
+
+    def __bool__(self):
+        return self.__bool
 
 
 class WeChatClient(object):
@@ -262,6 +305,12 @@ class WeChatClient(object):
         self._listen_thread = None
         for cb in self.logout_callback:
             cb(self)
+
+    def save_group(self, group):
+        if not group:
+            return
+        self._run_callback(self.group_update_callback, group)
+        self._groups[group.user_id] = group
 
     def update_group(self, group):
         if not group:
@@ -491,12 +540,12 @@ class WeChatClient(object):
         )
 
         result = self._decode_content(resp.content)
-        # emoji_formatter(result['User'], 'NickName')
         credit = self.login_info
         credit['sync_check_key'] = result['SyncKey']
-        self.username = result['User']['UserName']
-        self.nickname = result['User']['NickName']
+        self.username = fix_emoji(result['User']['UserName'])
+        self.nickname = fix_emoji(result['User']['NickName'])
         self.invite_start_count = int(result['InviteStartCount'])
+        self.save_credential()
 
     def _get_initialize_contacts(self):
         url = self.login_info['main_uri'] + WeChatMeta.URL['web_status']
@@ -542,6 +591,38 @@ class WeChatClient(object):
         self._get_initialize_contacts()
         self._get_all_contacts()
 
+    def export_credential(self):
+        return {
+            'cookies': self.session.cookies.get_dict(),
+            'login_info': self.login_info,
+            'username': self.username,
+            'nickname': self.nickname,
+            'uin': self.uin,
+        }
+
+    def login_by_credential(self, credential=None):
+        if credential:
+            self._load_credential(credential)
+
+        cookies = self.session.cookies.get_dict()
+        cookies.update({
+            'login_frequency': '2',
+            'last_wxuin': self.login_info['wxuin'],
+            'MM_WX_NOTIFY_STATE': '1',
+            'MM_WX_SOUND_STATE': '1',
+        })
+        self.session.cookies = cookiejar_from_dict(cookies)
+
+        success, message, contacts = self._fetch_server_change()
+        if success:
+            self.login = True
+            self._alive = True
+            self._login_init()
+            self.listen_message()
+            return True
+        else:
+            return False
+
     #################
     # Contacts data #
     #################
@@ -551,14 +632,23 @@ class WeChatClient(object):
             group = self._query_entity(username)
             if not group:
                 return None
-            self.update_group(group)
+            self.save_group(group)
         return self._groups[username]
+
+    def get_group_by_nickname(self, nickname):
+        for group_id, group in self._groups.items():
+            if group['NickName'] == nickname:
+                return group
 
     def get_group_member(self, group_id, user_id):
         group = self.get_group_by_username(group_id)
         if not group:
             return None
-        return group['MemberList'].get(user_id)
+        return group.members.get(user_id)
+
+    @classmethod
+    def _process_fetch(cls, session, req):
+        return cls._decode_content(session.post(**req).content)
 
     def _query_entity(self, username):
         result = self._query_entities([username])
@@ -578,10 +668,18 @@ class WeChatClient(object):
                 reqs.append(self._build_username_req(seg, group_id))
             return reqs
 
+        def do_request(reqs, groups=None):
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                result = list(executor.map(
+                    self._process_fetch, [self.session] * len(reqs), reqs)
+                )
+            return zip(result, groups) if groups else result
+
+        # FIXME: async request work not meeting expectations
         async def _fetch(req):
             cookies = self.session.cookies.get_dict()
             try:
-                with async_timeout.timeout(10):
+                with async_timeout.timeout(100):
                     async with aiohttp.ClientSession(
                             loop=loop, cookies=cookies,
                             headers=self.HEADERS) as session:
@@ -600,28 +698,30 @@ class WeChatClient(object):
             result = loop.run_until_complete(asyncio.gather(*futures))
             return zip(result, groups) if groups else result
 
-        resp = do_async_request(package_req(user_ids))
-        entities = [g for r in resp if resp for g in r['ContactList']]
-        entities = {g['UserName']: g for g in entities}
+        resp = do_request(package_req(user_ids))
+        entities = [g for r in resp if resp for g in r.get('ContactList') if g]
+        entities = {g['UserName']: Contact(g, self.username) for g in entities}
         if not entities:
             logger.error('Aysnc request failed: raw resp: {}'.format(resp))
 
         req_queue = []
         group_queue = []
         for group_id, group in entities.items():
-            members = [m['UserName'] for m in group['MemberList']]
+            members = list(group.members.keys())
             sub_req = package_req(members, group_id)
             req_queue.extend(sub_req)
             group_queue.extend([group_id] * len(sub_req))
-            group['MemberList'] = []
+            group.members = {}
         if not req_queue:
             return list(entities.values())
 
-        resp = do_async_request(req_queue, group_queue)
+        resp = do_request(req_queue, group_queue)
         for member, group_id in resp:
             group = entities[group_id]
             if member:
-                group['MemberList'].extend(member['ContactList'])
+                for m in member['ContactList']:
+                    m = Contact(m, self.username)
+                    group.members[m.user_id] = m
         return list(entities.values())
 
     def _process_contacts_change(self, contacts):
@@ -631,9 +731,10 @@ class WeChatClient(object):
                 self.mp[user] = contact
             elif contact['UserName'].startswith(WeChatMeta.GROUP_PREFIX):
                 if contact['MemberList']:
-                    self.update_group(contact)
+                    c = Contact(contact, self.username)
+                    self.save_group(c)
                 else:
-                    self.update_group(self._query_entity(user))
+                    self.save_group(self._query_entity(user))
             else:
                 self.friends[user] = contact
 
@@ -670,16 +771,16 @@ class WeChatClient(object):
 
     def _handle_group_msg(self, from_user, to_user):
         group = self.get_group_by_username(to_user)
-        if not group or from_user not in group['MemberList']:
+        if not group or from_user not in group.members:
             print('from', from_user, 'to', to_user, 'group', group)
             raise MessageDataCorruptionError
 
-        user = group['MemberList'][from_user]
+        user = group.members[from_user]
         return {
             'from_user': from_user,
-            'from_nickname': user['DisplayName'] or user['NickName'],
+            'from_nickname': user.display_name or user.nickname,
             'to_user': to_user,
-            'to_nickname': group['NickName'],
+            'to_nickname': group.nickname,
         }
 
     def _handle_initialize_msg(self, msg):
@@ -687,19 +788,21 @@ class WeChatClient(object):
         group_ids = [u for u in users
                      if u.startswith(WeChatMeta.GROUP_PREFIX)]
         for group in self._query_entities(group_ids):
-            self.update_group(group)
+            self.save_group(group)
 
     def _handle_system_msg(self, msg, to_user):
         invite = WeChatMeta.RE['invite'].search(msg['Content'])
         if not invite:
             return {}
         group = self.get_group_by_username(to_user)
+        if not group:
+            return {}
         new = {
             'invite_by_nickname': invite.group('invite_by'),
             'invitee_nickname': invite.group('invitee'),
             'invite_by': '',
             'invitee': '',
-            'member_count': len(group['MemberList']),
+            'member_count': len(group.members),
         }
         if new['invite_by_nickname'] == WeChatMeta.INVITE_BY_MYSELF:
 
@@ -758,7 +861,7 @@ class WeChatClient(object):
                     new_msg['content'] = matched.group('content')
                     from_user = matched.group('username')
                     me = self.get_group_member(to_user, self.username) or {}
-                    my_nickname = me.get('DisplayName') or self.nickname
+                    my_nickname = me.display_name or self.nickname
                     if matched.group('nickname') == my_nickname:
                         new_msg['is_at_me'] = True
             elif msg_type == MESSAGE_TYPE.SYSTEM:
@@ -773,6 +876,8 @@ class WeChatClient(object):
 
     @classmethod
     def _run_callback(cls, callbacks, *args, **kwargs):
+        if isinstance(callbacks, dict):
+            callbacks = callbacks.values()
         for cb in callbacks:
             try:
                 cb(*args, **kwargs)
@@ -780,7 +885,7 @@ class WeChatClient(object):
                 logger.error('Failed run callback {}, args: {}, kwargs: '
                              '{}, error: {}'.format(cb, args, kwargs, err))
 
-    def _run_credential_update_callback(self):
+    def save_credential(self):
         for cb in self.credential_update_callback:
             cb(self.uin, self.export_credential())
 
@@ -814,7 +919,9 @@ class WeChatClient(object):
         last_chunk = 0
         for chunk in range(1, chunks+1):
             last_modified = time.strftime(WeChatMeta.TIME_FORMAT)
-            data_ticket = self.session.cookies['webwx_data_ticket']
+            data_ticket = self.session.cookies.get(
+                'webwx_data_ticket', domain=WeChatMeta.COOKIE_DOMAIN
+            )
             chunk_data = resp.content[self.CHUNK_SIZE * last_chunk:
                                       self.CHUNK_SIZE * chunk]
             files = OrderedDict([
@@ -982,44 +1089,13 @@ class WeChatClient(object):
     def _load_credential(self, credential):
         self.login_info = credential['login_info']
         self.session.cookies = cookiejar_from_dict(credential['cookies'])
-        self.uin_username_map = credential['uin_username_map']
         self.uin = self.login_info['wxuin']
-        self.nickname = self.login_info['nickname']
-        self.username = self.login_info['username']
-        self._groups = credential['groups']
+        self.nickname = credential['nickname']
+        self.username = credential['username']
 
     def register_credential_update_callback(self, callback, *args, **kwargs):
         self.credential_update_callback.append(
             functools.partial(callback, *args, **kwargs))
-
-    def export_credential(self):
-        return {
-            'cookies': self.session.cookies.get_dict(),
-            'login_info': self.login_info,
-            'uin_username_map': self.uin_username_map,
-            'groups': self._groups,
-        }
-
-    def login_by_credential(self, credential=None):
-        if credential:
-            self._load_credential(credential)
-
-        cookies = self.session.cookies.get_dict()
-        cookies.update({
-            'login_frequency': '2',
-            'last_wxuin': self.login_info['wxuin'],
-            'MM_WX_NOTIFY_STATE': '1',
-            'MM_WX_SOUND_STATE': '1',
-        })
-        self.session.cookies = cookiejar_from_dict(cookies)
-
-        message, contacts = self._fetch_server_change()
-        if message:
-            self.login = True
-            self._login_init()
-            return True
-        else:
-            return False
 
     def create_group(self, member_list, name=''):
         """
@@ -1128,7 +1204,7 @@ class WeChatClient(object):
             'DelMemberList': ','.join(member_list),
         }
         resp = self.session.post(url, params=params, json=data)
-        self.update_group(self._query_entity(username))
+        self.save_group(self._query_entity(username))
         return resp.json()['BaseResponse']['Ret'] == 0
 
     def add_group_number(self, group_id, member_list):
@@ -1156,7 +1232,7 @@ class WeChatClient(object):
             data['AddMemberList'] = members
 
         resp = self.session.post(url, params=params, json=data)
-        self.update_group(self._query_entity(username))
+        self.save_group(self._query_entity(username))
         return resp.json()['BaseResponse']['Ret'] == 0
 
     def update_group_nickname(self, group_id, nickname):
@@ -1180,7 +1256,7 @@ class WeChatClient(object):
             url, params=params,
             data=json.dumps(data, ensure_ascii=False).encode('utf8', 'ignore'),
         )
-        self.update_group(self._query_entity(username))
+        self.save_group(self._query_entity(username))
         return resp.json()['BaseResponse']['Ret'] == 0
 
     #################
@@ -1199,7 +1275,7 @@ class WeChatClient(object):
             'DelMemberList': ','.join(member_ids),
         }
         resp = self.session.post(url, params=params, json=data)
-        self.update_group(self._query_entity(group_id))
+        self.save_group(self._query_entity(group_id))
         return resp.json()['BaseResponse']['Ret'] == 0
 
     ##################
@@ -1208,7 +1284,7 @@ class WeChatClient(object):
 
     def listen_message(self, retries=3, thread=True):
         def fetch_event():
-            messages, contacts = self._fetch_server_change()
+            _, messages, contacts = self._fetch_server_change()
             self._process_new_message(messages)
             self._process_contacts_change(contacts)
 
@@ -1263,7 +1339,9 @@ class WeChatClient(object):
             '{}_{}'.format(item['Key'], item['Val'])
             for item in result['SyncCheckKey']['List']
         ])
-        return result['AddMsgList'], result['ModContactList']
+        self.save_credential()
+        success = result['BaseResponse']['Ret'] == 0
+        return success, result['AddMsgList'], result['ModContactList']
 
     def _sync_check(self):
         url = self.login_info['web_sync_uri'] + WeChatMeta.URL['sync_check']
