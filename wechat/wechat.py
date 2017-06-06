@@ -42,7 +42,7 @@ logger = set_logger('wechat')
 
 class NamedVKDict(object):
     """
-    usage: 
+    usage:
     >>> country = NamedVKDict({'CHINA': 0, 'AMERICA': 1, 'BRITAIN': 2})
     >>> country.CHINA
     >>> 0
@@ -61,8 +61,6 @@ class NamedVKDict(object):
 
     def __getitem__(self, value):
         return self._index[value]
-
-
 
 
 def fix_emoji(val):
@@ -199,7 +197,7 @@ MESSAGE_TYPE = NamedVKDict({
 class Contact(object):
     RAW_FIELD = ['UserName', 'NickName', 'MemberList', 'DisplayName']
 
-    def __init__(self, raw_contact, owner_id):
+    def __init__(self, raw_contact, owner_id, is_group=False):
         self.__bool = bool(raw_contact)
         if not self.__bool:
             return
@@ -212,7 +210,7 @@ class Contact(object):
         self.display_name = fix_emoji(raw_contact.get('DisplayName', ''))
         self.is_owner = self._is_owner(member_list, owner_id)
         self.members = self.process_members(member_list, owner_id)
-        self.is_group = False
+        self.is_group = is_group
 
     @classmethod
     def process_members(cls, members, owner_id):
@@ -232,6 +230,16 @@ class Contact(object):
             if field not in raw_contact:
                 return True
         return True
+
+    def as_dict(self, client):
+        return {
+            'user_id': self.user_id,
+            'from_user': self.from_user,
+            'nickname': self.nickname,
+            'display_name': self.display_name,
+            'avatar_md5': hashlib.md5(client.get_avatar(self.user_id))
+                          .hexdigest()
+        }
 
     def __bool__(self):
         return self.__bool
