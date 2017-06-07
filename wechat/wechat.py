@@ -213,7 +213,7 @@ class Contact(object):
         self.is_group = is_group
 
     @property
-    def avatar():
+    def avatar(self):
         return self.account.get_avatar(self.user_id)
 
     def process_members(self, members):
@@ -651,7 +651,7 @@ class WeChatClient(object):
 
     def get_group_by_nickname(self, nickname):
         for group_id, group in self._groups.items():
-            if group['NickName'] == nickname:
+            if group.nickname == nickname:
                 return group
 
     def get_group_member(self, group_id, user_id):
