@@ -766,6 +766,9 @@ class WeChatClient(object):
         resp = self.session.get(url, params=params)
         return resp.content
 
+    def get_avatar_md5(self, user_id):
+        return hashlib.md5(self.get_avatar(user_id)).hexdigest()
+
     ##################
     # handle message #
     ##################
@@ -808,7 +811,7 @@ class WeChatClient(object):
         invite = WeChatMeta.RE['invite'].search(msg['Content'])
         if not invite:
             return {}
-        group = self.get_group_by_username(to_user)
+        group = self.get_group_by_username(to_user, force_remote=True)
         if not group:
             return {}
         new = {
@@ -820,14 +823,12 @@ class WeChatClient(object):
         }
         if new['invite_by_nickname'] == WeChatMeta.INVITE_BY_MYSELF:
 
-            me = group['MemberList'][self.username]
-            new['invite_by_nickname'] = me['DisplayName'] or \
-                                        self.nickname
+            me = group.members[self.username]
+            new['invite_by_nickname'] = me.display_name or self.nickname
             new['invite_by'] = self.username
 
-        group = self.get_group_by_username(to_user)
-        for member_id, member in group['MemberList'].items():
-            display_name = member['DisplayName'] or member['NickName']
+        for member_id, member in group.members.items():
+            display_name = member.display_name or member.nickname
             if not new['invite_by'] and \
                     display_name == new['invite_by_nickname']:
                 new['invite_by'] = member_id
