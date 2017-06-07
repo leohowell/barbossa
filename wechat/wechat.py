@@ -119,15 +119,12 @@ class MessageDataCorruptionError(WeChatError):
 
 class WeChatMeta(object):
     APP_ID = 'wx782c26e4c19acffb'  # Got from itChat
-
-    SEND_MESSAGE_URL = '/webwxsendmsg'
-    SEND_IMAGE_URL = '/webwxsendmsgimg'
-    SEND_VIDEO_URL = '/webwxsendvideomsg'
-    SEND_FILE_URL = '/webwxsendappmsg'
-    UPDATE_GROUP_URL = '/webwxupdatechatroom'
-    CREATE_GROUP_URL = '/webwxcreatechatroom'
-    SET_PIN_URL = '/webwxoplog'
-
+    GROUP_PREFIX = '@@'
+    INVITE_BY_MYSELF = '你'
+    MP_FLAG = 'gh_'
+    COOKIE_DOMAIN = '.qq.com'
+    TIME_FORMAT = '%a %b %d %Y %H:%M:%S GMT+0800 (CST)'
+    
     FILE_MESSAGE_TEMPLATE = (
         "<appmsg appid='{}' sdkver=''><title>{}</title><des></des><action>"
         "</action><type>6</type><content></content><url></url><lowurl>"
@@ -135,13 +132,7 @@ class WeChatMeta(object):
         "<fileext>{}</fileext></appattach><extinfo></extinfo></appmsg>"
     )
 
-    GROUP_PREFIX = '@@'
-    INVITE_BY_MYSELF = '你'
-    MP_FLAG = 'gh_'
     LOGIN_URI = 'https://login.weixin.qq.com'
-    COOKIE_DOMAIN = '.qq.com'
-    TIME_FORMAT = '%a %b %d %Y %H:%M:%S GMT+0800 (CST)'
-
     URL = {
         'uuid': LOGIN_URI + '/jslogin',
         'push_login': LOGIN_URI + '/cgi-bin/mmwebwx-bin/webwxpushloginurl',
@@ -272,9 +263,8 @@ class WeChatClient(object):
         self.session.headers = self.HEADERS
 
         self.friends = {}
-        self._groups = {}
+        self.groups = {}
         self.mp = {}
-        self.uin_username_map = {}
 
         self.logout_callback = []
         self.message_callback = {}
@@ -306,132 +296,6 @@ class WeChatClient(object):
         if self.listen_thread and self.listen_thread.isAlive():
             raise MultiListenThreadError
         self._listen_thread = value
-
-    @property
-    def groups(self):
-        return list(self._groups.values())
-
-    def logout(self):
-        self._alive = False
-        self.login = False
-        old_listen_thread = self._listen_thread
-        del old_listen_thread
-        self._listen_thread = None
-        for cb in self.logout_callback:
-            cb(self)
-
-    def save_group(self, group):
-        if not group:
-            return
-        self._run_callback(self.group_update_callback, group)
-        self._groups[group.user_id] = group
-
-    def update_group(self, group):
-        if not group:
-            return
-        username = group['UserName']
-        if group['MemberList'] and isinstance(group['MemberList'], list):
-            if group['MemberList'][0]['UserName'] == self.username:
-                group['isOwner'] = True
-
-            group['MemberList'] = {
-                m['UserName']: m for m in group['MemberList']
-            }
-        else:
-            group['MemberList'] = {}
-
-        self._run_callback(self.group_update_callback, group)
-
-        if username in self._groups:
-            self._groups[username].update(group)
-        else:
-            self._groups[username] = group
-
-    def _push_login(self):
-        uin = self.login_info['wxuin']
-        resp = self.session.get(WeChatMeta.URL['push_login'],
-                                params={'uin': uin})
-        result = resp.json()
-        if 'uuid' in result and str(result.get('ret')) == '0':
-            self.uuid = result['uuid']
-            return True
-        else:
-            return False
-
-    def _batch_get_contact(self, usernames, groups=None):
-        url = self.login_info['main_uri'] + WeChatMeta.URL['bget_contacts']
-        params = {'type': 'ex', 'r': int(time.time())}
-
-        if not groups:
-            request_list = [
-                {'UserName': username, 'EncryChatRoomId': ''}
-                for username in usernames
-            ]
-        else:
-            assert len(usernames) == len(groups), \
-                'Username length not equal to Chatrooms length'
-            request_list = [
-                {'UserName': username, 'EncryChatRoomId': group_id}
-                for username, group_id in zip(usernames, groups)
-            ]
-        data = {
-            'BaseRequest': self.login_info['base_request'],
-            'Count': len(usernames),
-            'List': request_list,
-        }
-        resp = self.session.post(url, params=params, json=data)
-        return self._decode_content(resp.content)
-
-    def _build_username_req(self, user_ids, group_id):
-        if not group_id:
-            request_list = [
-                {'UserName': user, 'EncryChatRoomId': ''}
-                for user in user_ids
-            ]
-        else:
-            request_list = [
-                {'UserName': user, 'EncryChatRoomId': group_id}
-                for user in user_ids
-            ]
-        return {
-            'url': self.login_info['main_uri'] + WeChatMeta.URL['bget_contacts'],
-            'params': {'type': 'ex', 'r': int(time.time())},
-            'data': json.dumps({
-                'BaseRequest': self.login_info['base_request'],
-                'Count': len(user_ids),
-                'List': request_list,
-            })
-        }
-
-    def _get_username_info(self, username, singleton=True):
-        if not isinstance(username, (list, set, tuple)):
-            username = [username]
-        else:
-            singleton = False
-
-        def fetch_member_info(members, group_id):
-            """fetch 50 contacts info each time"""
-            member_list = []
-            for i in range(1, len(members) // 50 + 2):
-                batch_members = members[(i - 1) * 50: i * 50]
-                result = self._batch_get_contact(
-                    batch_members, [group_id] * len(batch_members)
-                )
-                member_list.extend([m for m in result['ContactList']])
-            return member_list
-
-        groups = self._batch_get_contact(username)['ContactList']
-        for group in groups:
-            members = [m['UserName'] for m in group['MemberList']]
-            # modify group in-place
-            group['MemberList'] = fetch_member_info(members, group['UserName'])
-        if not groups:
-            return {} if singleton else []
-        return groups[0] if singleton else groups
-
-    @staticmethod
-    def _decode_content(content):
-        return json.loads(content.decode('utf-8', 'replace'))
 
     ##################
     # login & logout #
@@ -614,6 +478,13 @@ class WeChatClient(object):
             'uin': self.uin,
         }
 
+    def _load_credential(self, credential):
+        self.login_info = credential['login_info']
+        self.session.cookies = cookiejar_from_dict(credential['cookies'])
+        self.uin = self.login_info['wxuin']
+        self.nickname = credential['nickname']
+        self.username = credential['username']
+
     def login_by_credential(self, credential=None):
         if credential:
             self._load_credential(credential)
@@ -637,20 +508,46 @@ class WeChatClient(object):
         else:
             return False
 
+    def _push_login(self):
+        uin = self.login_info['wxuin']
+        resp = self.session.get(WeChatMeta.URL['push_login'],
+                                params={'uin': uin})
+        result = resp.json()
+        if 'uuid' in result and str(result.get('ret')) == '0':
+            self.uuid = result['uuid']
+            return True
+        else:
+            return False
+
+    def logout(self):
+        self._alive = False
+        self.login = False
+        old_listen_thread = self._listen_thread
+        del old_listen_thread
+        self._listen_thread = None
+        for cb in self.logout_callback:
+            cb(self)
+
     #################
     # Contacts data #
     #################
 
+    def save_group(self, group):
+        if not group:
+            return
+        self._run_callback(self.group_update_callback, group)
+        self.groups[group.user_id] = group
+
     def get_group_by_username(self, username, force_remote=False):
-        if force_remote or username not in self._groups:
+        if force_remote or username not in self.groups:
             group = self._query_entity(username)
             if not group:
                 return None
             self.save_group(group)
-        return self._groups[username]
+        return self.groups[username]
 
     def get_group_by_nickname(self, nickname):
-        for group_id, group in self._groups.items():
+        for group_id, group in self.groups.items():
             if group.nickname == nickname:
                 return group
 
@@ -663,6 +560,27 @@ class WeChatClient(object):
     @classmethod
     def _process_fetch(cls, session, req):
         return cls._decode_content(session.post(**req).content)
+
+    def _build_username_req(self, user_ids, group_id):
+        if not group_id:
+            request_list = [
+                {'UserName': user, 'EncryChatRoomId': ''}
+                for user in user_ids
+            ]
+        else:
+            request_list = [
+                {'UserName': user, 'EncryChatRoomId': group_id}
+                for user in user_ids
+            ]
+        return {
+            'url': self.login_info['main_uri'] + WeChatMeta.URL['bget_contacts'],
+            'params': {'type': 'ex', 'r': int(time.time())},
+            'data': json.dumps({
+                'BaseRequest': self.login_info['base_request'],
+                'Count': len(user_ids),
+                'List': request_list,
+            })
+        }
 
     def _query_entity(self, username):
         result = self._query_entities([username])
@@ -904,6 +822,10 @@ class WeChatClient(object):
         for cb in self.credential_update_callback:
             cb(self.uin, self.export_credential())
 
+    def register_credential_update_callback(self, callback, *args, **kwargs):
+        self.credential_update_callback.append(
+            functools.partial(callback, *args, **kwargs))
+
     ################
     # Send message #
     ################
@@ -1002,19 +924,19 @@ class WeChatClient(object):
             raise ValueError('Unsupported message type: {}'.format(msg_type))
 
         if msg_type == MESSAGE_TYPE.TEXT:
-            url = self.login_info['main_uri'] + WeChatMeta.SEND_MESSAGE_URL
+            url = self.login_info['main_uri'] + WeChatMeta.URL['send_message']
             result = self._send(to_user, msg_type, url, content=payload)
             return result['BaseResponse']['Ret'] == 0
 
         if msg_type == MESSAGE_TYPE.IMAGE:
             media_type = 'pic'
-            path = WeChatMeta.SEND_IMAGE_URL
+            path = WeChatMeta.URL['send_image']
         elif msg_type == MESSAGE_TYPE.VIDEO:
             media_type = 'video'
-            path = WeChatMeta.SEND_VIDEO_URL
+            path = WeChatMeta.URL['send_video']
         elif msg_type == MESSAGE_TYPE.FILE:
             media_type = 'doc'
-            path = WeChatMeta.SEND_FILE_URL
+            path = WeChatMeta.URL['send_file']
         else:
             raise ValueError('Unsupported message type: {}'.format(msg_type))
 
@@ -1040,77 +962,81 @@ class WeChatClient(object):
             media_id, os.path.splitext(file_path)[1].replace('.', ''),
         )
 
-    def _upload_media(self, file_path, media_type, to_user='filehelper'):
-        """
-        :return: media_id
-        """
+    #################
+    # Group manager #
+    #################
 
-        assert media_type in ('pic', 'video', 'doc'), \
-            'Invalid media type: {}'.format(media_type)
-        params = {'f': 'json'}
+    def _handle_group_id(self, group_id):
+        if group_id.startswith(WeChatMeta.GROUP_PREFIX):
+            return group_id
+        return self.get_group_by_nickname(group_id)
 
-        file_size = os.path.getsize(file_path)
-        file_type = mimetypes.guess_type(file_path)[0] or \
-                    'application/octet-stream'
-        with open(file_path, 'rb') as fd:
-            file_md5 = hashlib.md5(fd.read()).hexdigest()
+    def del_group_member(self, group_id, member_ids):
+        url = self.login_info['main_uri'] + WeChatMeta.URL['update_group']
+        params = {
+            'fun': 'delmember',
+            'pass_ticket': self.login_info['pass_ticket'],
+        }
+        data = {
+            'BaseRequest': self.login_info['base_request'],
+            'ChatRoomName': group_id,
+            'DelMemberList': ','.join(member_ids),
+        }
+        resp = self.session.post(url, params=params, json=data)
+        self.save_group(self._query_entity(group_id))
+        return resp.json()['BaseResponse']['Ret'] == 0
 
-        upload_media_request = json.dumps(OrderedDict([
-            ('UploadType', 2),
-            ('BaseRequest', self.login_info['base_request']),
-            ('ClientMediaId', int(time.time() * 1e4)),
-            ('TotalLen', file_size),
-            ('StartPos', 0),
-            ('DataLen', file_size),
-            ('MediaType', 4),
-            ('FromUserName', self.username),
-            ('ToUserName', to_user),
-            ('FileMd5', file_md5),
-        ]), separators=(',', ':'))
+    def update_group_nickname(self, group_id, nickname):
+        username = self._handle_group_id(group_id)
+        if not username:
+            logger.error('Failed update group nickname,'
+                         ' invalid group_id: {}'.format(group_id))
+            return False
 
-        result = None
-        chunks = int((file_size - 1) / self.CHUNK_SIZE) + 1
-        with open(file_path, 'rb') as fd:
-            for chunk in range(chunks):
-                last_modified = time.strftime(
-                    '%a %b %d %Y %H:%M:%S GMT+0800 (CST)')
-                data_ticket = self.session.cookies['webwx_data_ticket']
-                files = OrderedDict([
-                    ('id', (None, 'WU_FILE_0')),
-                    ('name', (None, os.path.basename(file_path))),
-                    ('type', (None, file_type)),
-                    ('lastModifiedDate', (None, last_modified)),
-                    ('size', (None, str(file_size))),
-                    ('mediatype', (None, media_type)),
-                    ('uploadmediarequest', (None, upload_media_request)),
-                    ('webwx_data_ticket', (None, data_ticket)),
-                    ('pass_ticket', (None, self.login_info['pass_ticket'])),
-                    ('filename', (os.path.basename(file_path),
-                        fd.read(self.CHUNK_SIZE), 'application/octet-stream'))
-                ])
-                if chunks != 1:
-                    files['chunk'] = (None, str(chunk))
-                    files['chunks'] = (None, str(chunks))
+        url = self.login_info['main_uri'] + WeChatMeta.URL['update_group']
+        params = {
+            'fun': 'modtopic',
+            'pass_ticket': self.login_info['pass_ticket'],
+        }
+        data = {
+            'BaseRequest': self.login_info['base_request'],
+            'ChatRoomName': username,
+            'NewTopic': nickname,
+        }
+        resp = self.session.post(
+            url, params=params,
+            data=json.dumps(data, ensure_ascii=False).encode('utf8', 'ignore'),
+        )
+        self.save_group(self._query_entity(username))
+        return resp.json()['BaseResponse']['Ret'] == 0
 
-                url = self.login_info['upload_uri'] + \
-                      WeChatMeta.URL['upload_media']
-                resp = self.session.post(url, params=params, files=files)
-                try:
-                    result = resp.json()['MediaId']
-                except (TypeError, ValueError):
-                    result = None
-        return result
+    def add_group_number(self, group_id, member_list):
+        username = self._handle_group_id(group_id)
+        if not username or username not in self.groups:
+            logger.error('Failed delete group members,'
+                         ' invalid group_id: {}'.format(group_id))
+            return False
 
-    def _load_credential(self, credential):
-        self.login_info = credential['login_info']
-        self.session.cookies = cookiejar_from_dict(credential['cookies'])
-        self.uin = self.login_info['wxuin']
-        self.nickname = credential['nickname']
-        self.username = credential['username']
+        url = self.login_info['main_uri'] + WeChatMeta.URL['update_group']
+        params = {'pass_ticket': self.login_info['pass_ticket']}
+        data = {
+            'BaseRequest': self.login_info['base_request'],
+            'ChatRoomName': username,
+        }
 
-    def register_credential_update_callback(self, callback, *args, **kwargs):
-        self.credential_update_callback.append(
-            functools.partial(callback, *args, **kwargs))
+        members = ','.join(member_list)
+        group = self.groups.get(username)
+
+        if len(group.members) > self.invite_start_count:
+            params['fun'] = 'invitemember'
+            data['InviteMemberList'] = members
+        else:
+            params['fun'] = 'addmember'
+            data['AddMemberList'] = members
+
+        resp = self.session.post(url, params=params, json=data)
+        self.save_group(self._query_entity(username))
+        return resp.json()['BaseResponse']['Ret'] == 0
 
     def create_group(self, member_list, name=''):
         """
@@ -1118,7 +1044,7 @@ class WeChatClient(object):
         :param name: group name
         :return: group info dict
         """
-        url = self.login_info['main_uri'] + WeChatMeta.CREATE_GROUP_URL
+        url = self.login_info['main_uri'] + WeChatMeta.URL['create_group']
         params = {
             'pass_ticket': self.login_info['pass_ticket'],
             'r': int(time.time()),
@@ -1142,156 +1068,6 @@ class WeChatClient(object):
             self.send_message(username, 'text', 'Everyone welcome!')
             self._get_initialize_contacts()
             return username
-
-    def set_pin(self, username, pin=True):
-        url = self.login_info['main_uri'] + WeChatMeta.SET_PIN_URL
-        params = {
-            'pass_ticket': self.login_info['pass_ticket'],
-            'lang': 'zh_CN',
-        }
-        data = {
-            'UserName': username,
-            'CmdId': 3,
-            'OP': int(pin),
-            'RemarkName': '',
-            'BaseRequest': self.login_info['base_request'],
-        }
-        resp = self.session.post(url, params=params, json=data)
-        return resp.json()['BaseResponse']['Ret'] == 0
-
-    def get_groups(self, uins=None, usernames=None, nicknames=None):
-        if not self.groups:
-            username_uin_map = {v: k for k, v in self.uin_username_map.items()}
-            usernames = list(self.uin_username_map.values())
-            usernames = [u for u in usernames if u and u.startswith('@@')]
-            groups = self._query_entity(usernames)
-            for group in groups:
-                username = group['UserName']
-                group['Uin'] = username_uin_map.get(username, 0)
-                self.update_group(group)
-
-        result = []
-        if uins:
-            usernames = [self.uin_username_map.get(uin) for uin in uins]
-
-        if usernames:
-            for username in usernames:
-                result.append(self._groups.get(username))
-                return result
-
-        if nicknames:
-            for nickname in nicknames:
-                for group in self.groups:
-                    if group['NickName'] == nickname:
-                        result.append(group)
-                        break
-            return result
-
-        return self.groups
-
-    def _handle_group_id(self, group_id):
-        if group_id.startswith('@@'):
-            return group_id
-
-        username = self.uin_username_map.get(group_id)
-        if username:
-            return username
-
-        for group in self.groups:
-            if group['NickName'] == group_id:
-                return group['UserName']
-
-    def delete_group_member(self, group_id, member_list):
-        username = self._handle_group_id(group_id)
-        if not username:
-            logger.error('Failed delete members, invalid uin: {}'.format(
-                group_id))
-            return False
-
-        url = self.login_info['main_uri'] + WeChatMeta.UPDATE_GROUP_URL
-        params = {
-            'fun': 'delmember',
-            'pass_ticket': self.login_info['pass_ticket'],
-        }
-        data = {
-            'BaseRequest': self.login_info['base_request'],
-            'ChatRoomName': username,
-            'DelMemberList': ','.join(member_list),
-        }
-        resp = self.session.post(url, params=params, json=data)
-        self.save_group(self._query_entity(username))
-        return resp.json()['BaseResponse']['Ret'] == 0
-
-    def add_group_number(self, group_id, member_list):
-        username = self._handle_group_id(group_id)
-        if not username or username not in self._groups:
-            logger.error('Failed delete group members,'
-                         ' invalid group_id: {}'.format(group_id))
-            return False
-
-        url = self.login_info['main_uri'] + WeChatMeta.UPDATE_GROUP_URL
-        params = {'pass_ticket': self.login_info['pass_ticket']}
-        data = {
-            'BaseRequest': self.login_info['base_request'],
-            'ChatRoomName': username,
-        }
-
-        members = ','.join(member_list)
-        group = self._groups.get(username)
-
-        if len(group['MemberList']) > self.invite_start_count:
-            params['fun'] = 'invitemember'
-            data['InviteMemberList'] = members
-        else:
-            params['fun'] = 'addmember'
-            data['AddMemberList'] = members
-
-        resp = self.session.post(url, params=params, json=data)
-        self.save_group(self._query_entity(username))
-        return resp.json()['BaseResponse']['Ret'] == 0
-
-    def update_group_nickname(self, group_id, nickname):
-        username = self._handle_group_id(group_id)
-        if not username:
-            logger.error('Failed update group nickname,'
-                         ' invalid group_id: {}'.format(group_id))
-            return False
-
-        url = self.login_info['main_uri'] + WeChatMeta.UPDATE_GROUP_URL
-        params = {
-            'fun': 'modtopic',
-            'pass_ticket': self.login_info['pass_ticket'],
-        }
-        data = {
-            'BaseRequest': self.login_info['base_request'],
-            'ChatRoomName': username,
-            'NewTopic': nickname,
-        }
-        resp = self.session.post(
-            url, params=params,
-            data=json.dumps(data, ensure_ascii=False).encode('utf8', 'ignore'),
-        )
-        self.save_group(self._query_entity(username))
-        return resp.json()['BaseResponse']['Ret'] == 0
-
-    #################
-    # Group manager #
-    #################
-
-    def del_group_member(self, group_id, member_ids):
-        url = self.login_info['main_uri'] + WeChatMeta.URL['update_group']
-        params = {
-            'fun': 'delmember',
-            'pass_ticket': self.login_info['pass_ticket'],
-        }
-        data = {
-            'BaseRequest': self.login_info['base_request'],
-            'ChatRoomName': group_id,
-            'DelMemberList': ','.join(member_ids),
-        }
-        resp = self.session.post(url, params=params, json=data)
-        self.save_group(self._query_entity(group_id))
-        return resp.json()['BaseResponse']['Ret'] == 0
 
     ##################
     # Listen message #
@@ -1377,6 +1153,30 @@ class WeChatClient(object):
             return -1
         else:
             return int(matched.group('selector'))
+
+    ###################
+    # other operation #
+    ###################
+
+    def set_pin(self, username, pin=True):
+        url = self.login_info['main_uri'] + WeChatMeta.URL['set_pin']
+        params = {
+            'pass_ticket': self.login_info['pass_ticket'],
+            'lang': 'zh_CN',
+        }
+        data = {
+            'UserName': username,
+            'CmdId': 3,
+            'OP': int(pin),
+            'RemarkName': '',
+            'BaseRequest': self.login_info['base_request'],
+        }
+        resp = self.session.post(url, params=params, json=data)
+        return resp.json()['BaseResponse']['Ret'] == 0
+
+    @staticmethod
+    def _decode_content(content):
+        return json.loads(content.decode('utf-8', 'replace'))
 
 
 class WeChatUnitTest(unittest.TestCase):
