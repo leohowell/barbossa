@@ -156,7 +156,7 @@ def get_avatar(user_id):
 @get('/contacts/group/<group_id>/member/<member_id>')
 def get_group_member(group_id, member_id):
     member = client.get_group_member(group_id, member_id)
-    return json.dumps(member.as_dict(client))
+    return json.dumps(member.as_dict())
 
 
 if __name__ == '__main__':

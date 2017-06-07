@@ -197,30 +197,32 @@ MESSAGE_TYPE = NamedVKDict({
 class Contact(object):
     RAW_FIELD = ['UserName', 'NickName', 'MemberList', 'DisplayName']
 
-    def __init__(self, raw_contact, owner_id, is_group=False):
+    def __init__(self, raw_contact, account, is_group=False):
         self.__bool = bool(raw_contact)
         if not self.__bool:
             return
 
         member_list = raw_contact.get('MemberList', [])
 
-        self.from_user = owner_id
+        self.account = account
         self.user_id = raw_contact['UserName']
         self.nickname = fix_emoji(raw_contact['NickName'])
         self.display_name = fix_emoji(raw_contact.get('DisplayName', ''))
-        self.is_owner = self._is_owner(member_list, owner_id)
-        self.members = self.process_members(member_list, owner_id)
+        self.is_owner = self._is_owner(member_list)
+        self.members = self.process_members(member_list)
         self.is_group = is_group
 
-    @classmethod
-    def process_members(cls, members, owner_id):
-        return {m['UserName']: cls(m, owner_id) for m in members}
+    @property
+    def avatar():
+        return self.account.get_avatar(self.user_id)
 
-    @classmethod
-    def _is_owner(cls, members, owner_id):
+    def process_members(self, members):
+        return {m['UserName']: Contact(m, self.account) for m in members}
+
+    def _is_owner(self, members):
         if not members:
             return False
-        return members[0]['UserName'] == owner_id
+        return members[0]['UserName'] == self.account.username
 
     @classmethod
     def is_data_corruption(cls, raw_contact):
@@ -231,13 +233,17 @@ class Contact(object):
                 return True
         return True
 
-    def as_dict(self, client):
+    def as_dict(self):
         return {
             'user_id': self.user_id,
-            'from_user': self.from_user,
+            'account': {
+                'username': self.account.username,
+                'nickname': self.account.nickname,
+                'uin': self.account.uin,
+            },
             'nickname': self.nickname,
             'display_name': self.display_name,
-            'avatar_md5': hashlib.md5(client.get_avatar(self.user_id))
+            'avatar_md5': hashlib.md5(self.account.get_avatar(self.user_id))
                           .hexdigest()
         }
 
@@ -708,7 +714,7 @@ class WeChatClient(object):
 
         resp = do_request(package_req(user_ids))
         entities = [g for r in resp if resp for g in r.get('ContactList') if g]
-        entities = {g['UserName']: Contact(g, self.username) for g in entities}
+        entities = {g['UserName']: Contact(g, self, True) for g in entities}
         if not entities:
             logger.error('Aysnc request failed: raw resp: {}'.format(resp))
 
@@ -728,7 +734,7 @@ class WeChatClient(object):
             group = entities[group_id]
             if member:
                 for m in member['ContactList']:
-                    m = Contact(m, self.username)
+                    m = Contact(m, self)
                     group.members[m.user_id] = m
         return list(entities.values())
 
@@ -739,7 +745,7 @@ class WeChatClient(object):
                 self.mp[user] = contact
             elif contact['UserName'].startswith(WeChatMeta.GROUP_PREFIX):
                 if contact['MemberList']:
-                    c = Contact(contact, self.username)
+                    c = Contact(contact, self)
                     self.save_group(c)
                 else:
                     self.save_group(self._query_entity(user))
