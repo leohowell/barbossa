@@ -969,7 +969,8 @@ class WeChatClient(object):
     def _handle_group_id(self, group_id):
         if group_id.startswith(WeChatMeta.GROUP_PREFIX):
             return group_id
-        return self.get_group_by_nickname(group_id)
+        group = self.get_group_by_nickname(group_id)
+        return group.user_id if group else None
 
     def del_group_member(self, group_id, member_ids):
         url = self.login_info['main_uri'] + WeChatMeta.URL['update_group']

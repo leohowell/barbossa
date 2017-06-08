@@ -120,7 +120,7 @@ def sse_message():
 
 @route('/contacts')
 def contacts():
-    return template('contacts', groups=client.groups,
+    return template('contacts', groups=client.groups.values(),
                     main_uri=client.login_info['main_uri'].rsplit('/', 2)[0],
                     skey=client.login_info['skey'],
                     )
