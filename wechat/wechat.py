@@ -124,7 +124,7 @@ class WeChatMeta(object):
     MP_FLAG = 'gh_'
     COOKIE_DOMAIN = '.qq.com'
     TIME_FORMAT = '%a %b %d %Y %H:%M:%S GMT+0800 (CST)'
-    
+
     FILE_MESSAGE_TEMPLATE = (
         "<appmsg appid='{}' sdkver=''><title>{}</title><des></des><action>"
         "</action><type>6</type><content></content><url></url><lowurl>"
@@ -188,9 +188,10 @@ MESSAGE_TYPE = NamedVKDict({
 class Contact(object):
     RAW_FIELD = ['UserName', 'NickName', 'MemberList', 'DisplayName']
 
-    def __init__(self, raw_contact, account, is_group=False):
-        self.__bool = bool(raw_contact)
-        if not self.__bool:
+    def __init__(self, raw_contact=None, account=None, is_group=False,
+                 dumps=None):
+        self.__bool = False or bool(raw_contact)
+        if dumps or not self.__bool:
             return
 
         member_list = raw_contact.get('MemberList', [])
@@ -224,19 +225,45 @@ class Contact(object):
                 return True
         return True
 
-    def as_dict(self):
-        return {
+    def dump(self, avatar=False):
+        contact = {
             'user_id': self.user_id,
+            'nickname': self.nickname,
+            'display_name': self.display_name,
+            'is_owner': self.is_owner,
+            'is_group': self.is_group,
+            'members': {
+                user_id: member.dump(avatar)
+                for user_id, member in self.members.items()
+            },
             'account': {
                 'username': self.account.username,
                 'nickname': self.account.nickname,
                 'uin': self.account.uin,
             },
-            'nickname': self.nickname,
-            'display_name': self.display_name,
-            'avatar_md5': hashlib.md5(self.account.get_avatar(self.user_id))
-                          .hexdigest()
         }
+        if avatar:
+            avatar_bin = self.account.get_avatar(self.user_id)
+            contact['avatar_md5'] = hashlib.md5(avatar_bin).hexdigest()
+        return contact
+
+    @classmethod
+    def load(cls, dump, account=None):
+        if not isinstance(dump, dict):
+            contact = json.loads(dump)
+
+        contact = cls(dumps=True)
+        contact.account = account
+        contact.user_id = dump['user_id']
+        contact.nickname = dump['nickname']
+        contact.display_name = dump['display_name']
+        contact.is_owner = dump['is_owner']
+        contact.is_group = dump['is_group']
+        contact.members = {
+            user_id: cls.load(member, account)
+            for user_id, member in dump['members'].items()
+        }
+        return contact
 
     def __bool__(self):
         return self.__bool
@@ -270,6 +297,7 @@ class WeChatClient(object):
         self.message_callback = {}
         self.credential_update_callback = []
         self.group_update_callback = {}
+        self.tick_hooks = {}
 
         self.uin = None
         self.username = None
@@ -280,7 +308,7 @@ class WeChatClient(object):
         self.listening = False
 
         if credential:
-            self._load_credential(credential)
+            self.load_credential(credential)
 
     @property
     def alive(self):
@@ -478,7 +506,7 @@ class WeChatClient(object):
             'uin': self.uin,
         }
 
-    def _load_credential(self, credential):
+    def load_credential(self, credential):
         self.login_info = credential['login_info']
         self.session.cookies = cookiejar_from_dict(credential['cookies'])
         self.uin = self.login_info['wxuin']
@@ -487,7 +515,7 @@ class WeChatClient(object):
 
     def login_by_credential(self, credential=None):
         if credential:
-            self._load_credential(credential)
+            self.load_credential(credential)
 
         cookies = self.session.cookies.get_dict()
         cookies.update({
@@ -1083,6 +1111,7 @@ class WeChatClient(object):
         def receive_loop(_retries):
             fetch_event()
             while self._alive:
+                self._run_callback(self.tick_hooks, self)
                 try:
                     check_data = self._sync_check()
                     if check_data > 0:
