@@ -166,9 +166,9 @@ class WeChatMeta(object):
         'group_msg': re.compile(u'(?P<username>@[0-9a-z]+):<br/>'
                                 u'(@(?P<nickname>.*?)\u2005)?'
                                 u'(?P<content>.*)'),
-        'invite': re.compile(u'("(?P<invite_by>.*?)")?\u9080\u8bf7"'
-                             u'(?P<invitee>.*?)"加入了群聊'),
-        'remove': re.compile(u'"(?P<nickname>.*?)"移出了群聊'),
+        'invite': re.compile('.*?(邀请"(?P<invitee1>.*?)"|'
+                             '"(?P<invitee2>.*?)"通过)'),
+        'remove': re.compile('"(?P<nickname>.*?)"移出了群聊'),
         'emoji': re.compile(r'<span class="emoji emoji(.{1,10})"></span>'),
     }
 
@@ -761,28 +761,16 @@ class WeChatClient(object):
         if not group:
             return {}
         new = {
-            'invite_by_nickname': invite.group('invite_by'),
-            'invitee_nickname': invite.group('invitee'),
-            'invite_by': '',
             'invitee': '',
             'member_count': len(group.members),
+            'invitee_nickname': invite.group('invitee1') or \
+                                invite.group('invitee2'),
         }
-        if new['invite_by_nickname'] == WeChatMeta.INVITE_BY_MYSELF:
-
-            me = group.members[self.username]
-            new['invite_by_nickname'] = me.display_name or self.nickname
-            new['invite_by'] = self.username
 
         for member_id, member in group.members.items():
             display_name = member.display_name or member.nickname
-            if not new['invite_by'] and \
-                    display_name == new['invite_by_nickname']:
-                new['invite_by'] = member_id
-                continue
-            if not new['invitee'] and \
-                    display_name == new['invitee_nickname']:
+            if display_name == new['invitee_nickname']:
                 new['invitee'] = member_id
-            if new['invite_by'] and new['invitee']:
                 break
 
         return {'new_member': new}
